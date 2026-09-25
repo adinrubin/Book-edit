@@ -1,8 +1,12 @@
 import json
 import re
+import io
 import streamlit as st
-from google import genai
-from google.genai import types
+from groq import Groq
+import pypdf
+import ebooklib
+from ebooklib import epub
+from bs4 import BeautifulSoup
 
 # ==========================================================
 # CONSTANTS & CONFIGURATION
@@ -54,18 +58,46 @@ AGE_GROUPS = {
 }
 
 # ==========================================================
-# HELPER FUNCTIONS
+# FILE PARSING FUNCTIONS
 # ==========================================================
+def extract_text_from_file(uploaded_file):
+    filename = uploaded_file.name.lower()
+    
+    if filename.endswith(".txt"):
+        return uploaded_file.read().decode("utf-8", errors="ignore")
+    
+    elif filename.endswith(".pdf"):
+        pdf_reader = pypdf.PdfReader(uploaded_file)
+        text = ""
+        for page in pdf_reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        return text
+    
+    elif filename.endswith(".epub"):
+        # Load EPUB from memory stream
+        bytes_data = uploaded_file.read()
+        book = epub.read_epub(io.BytesIO(bytes_data))
+        text = ""
+        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            soup = BeautifulSoup(item.get_content(), 'html.parser')
+            text += soup.get_text() + "\n"
+        return text
+    
+    return ""
+
 def split_into_chapters(text: str):
-    """Splits manuscript into chapters using regex on common headings."""
     pattern = r"(?i)(?=^#+\s|^Chapter\s+\d+|^CHAPTER\s+\d+)"
     chapters = [c.strip() for c in re.split(pattern, text, flags=re.MULTILINE) if c.strip()]
     if not chapters:
-        return [text]
-    return chapters
+        # Fallback: split long non-chapter text into ~3000 word blocks
+        words = text.split()
+        chunk_size = 3000
+        chapters = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    return chapters or [text]
 
 def balance_percentages(values_dict, changed_key, target_total=100.0):
-    """Normalizes interactive slider values so the total equals target_total."""
     num_items = len(values_dict)
     if num_items <= 1:
         return {k: target_total for k in values_dict}
@@ -85,25 +117,14 @@ def balance_percentages(values_dict, changed_key, target_total=100.0):
 
     return result
 
-def get_gemini_client(api_key: str):
-    """Initializes the official Google GenAI client."""
-    if not api_key:
-        return None
-    return genai.Client(api_key=api_key)
-
 # ==========================================================
 # STREAMLIT UI SETUP & SESSION STATE
 # ==========================================================
 st.set_page_config(page_title="Multiverse Novel Remix Engine", layout="wide")
 st.title("🌌 The Multiverse Novel Remix Engine")
 
-# Initialize Session State Variables
 if "story_bible" not in st.session_state:
-    st.session_state.story_bible = {
-        "characters": [],
-        "world_rules": [],
-        "plot_threads": []
-    }
+    st.session_state.story_bible = {"characters": [], "world_rules": [], "plot_threads": []}
 if "remixed_chapters" not in st.session_state:
     st.session_state.remixed_chapters = []
 if "parent_weights" not in st.session_state:
@@ -113,7 +134,8 @@ if "sub_weights" not in st.session_state:
 
 # Sidebar Setup
 st.sidebar.header("🔑 Configuration")
-api_key = st.sidebar.text_input("Gemini API Key", type="password")
+groq_api_key = st.sidebar.text_input("Enter Free Groq API Key", type="password")
+st.sidebar.caption("Get a free key instantly at [console.groq.com](https://console.groq.com)")
 
 selected_age_group = st.sidebar.selectbox("Target Audience Age Group", list(AGE_GROUPS.keys()))
 age_config = AGE_GROUPS[selected_age_group]
@@ -124,12 +146,10 @@ for p in allowed_parents:
     if p not in st.session_state.parent_weights:
         st.session_state.parent_weights[p] = round(100.0 / len(allowed_parents), 1)
 
-# Remove restricted parents from session state
 st.session_state.parent_weights = {
     k: v for k, v in st.session_state.parent_weights.items() if k in allowed_parents
 }
 
-# Normalize parent weights
 total_p = sum(st.session_state.parent_weights.values()) or 1.0
 st.session_state.parent_weights = {
     k: round((v / total_p) * 100.0, 1) for k, v in st.session_state.parent_weights.items()
@@ -138,193 +158,182 @@ st.session_state.parent_weights = {
 # ==========================================================
 # MAIN INTERFACE
 # ==========================================================
-uploaded_file = st.file_uploader("Upload Manuscript (.txt)", type=["txt"])
+uploaded_file = st.file_uploader("Upload Manuscript (.txt, .pdf, .epub)", type=["txt", "pdf", "epub"])
 
 if uploaded_file:
-    raw_text = uploaded_file.read().decode("utf-8")
-    chapters = split_into_chapters(raw_text)
-    st.success(f"Manuscript loaded successfully! Detected {len(chapters)} chapter(s).")
+    raw_text = extract_text_from_file(uploaded_file)
+    if not raw_text.strip():
+        st.error("Could not extract text from this file. Please ensure it contains readable text.")
+    else:
+        chapters = split_into_chapters(raw_text)
+        st.success(f"File parsed! Extracted ~{len(raw_text.split())} words divided into {len(chapters)} chapter chunk(s).")
 
-    col1, col2 = st.columns([1, 1])
+        col1, col2 = st.columns([1, 1])
 
-    with col1:
-        st.subheader("🎛️ Theme & Genre Sliders")
-        st.info("Adjust the primary theme weights. Total always equals 100%.")
+        with col1:
+            st.subheader("🎛️ Theme & Genre Sliders")
+            updated_parents = {}
+            for parent in allowed_parents:
+                val = st.slider(
+                    f"{parent} Weight (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=float(st.session_state.parent_weights.get(parent, 0.0)),
+                    step=1.0,
+                    key=f"slider_parent_{parent}"
+                )
+                updated_parents[parent] = val
 
-        # Parent Sliders
-        updated_parents = {}
-        for parent in allowed_parents:
-            val = st.slider(
-                f"{parent} Weight (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=float(st.session_state.parent_weights.get(parent, 0.0)),
-                step=1.0,
-                key=f"slider_parent_{parent}"
-            )
-            updated_parents[parent] = val
+            for k, v in updated_parents.items():
+                if v != st.session_state.parent_weights.get(k, 0.0):
+                    st.session_state.parent_weights = balance_percentages(updated_parents, k)
+                    st.rerun()
 
-        # Handle normalization if slider moved
-        for k, v in updated_parents.items():
-            if v != st.session_state.parent_weights.get(k, 0.0):
-                st.session_state.parent_weights = balance_percentages(updated_parents, k)
-                st.rerun()
-
-        # Nested Sub-Genre Sliders
-        st.subheader("🧩 Sub-Genre Allocation")
-        final_composition = {}
-        
-        for parent, parent_weight in st.session_state.parent_weights.items():
-            if parent_weight > 0 and parent in age_config["sub_genres"]:
-                sub_list = age_config["sub_genres"][parent]
-                
-                # Initialize sub weights
-                if parent not in st.session_state.sub_weights:
-                    st.session_state.sub_weights[parent] = {
-                        sub: round(100.0 / len(sub_list), 1) for sub in sub_list
-                    }
-
-                with st.expander(f"{parent} Sub-Genres (Allocated Share: {parent_weight:.1f}%)"):
-                    updated_subs = {}
-                    for sub in sub_list:
-                        s_val = st.slider(
-                            f"{sub} (%)",
-                            min_value=0.0,
-                            max_value=100.0,
-                            value=float(st.session_state.sub_weights[parent].get(sub, 0.0)),
-                            step=1.0,
-                            key=f"slider_sub_{parent}_{sub}"
-                        )
-                        updated_subs[sub] = s_val
-
-                    # Normalize sub-genres
-                    for sk, sv in updated_subs.items():
-                        if sv != st.session_state.sub_weights[parent].get(sk, 0.0):
-                            st.session_state.sub_weights[parent] = balance_percentages(updated_subs, sk)
-                            st.rerun()
-
-                    # Calculate absolute contribution to full novel
-                    for sub, sub_pct in st.session_state.sub_weights[parent].items():
-                        effective_weight = (parent_weight * sub_pct) / 100.0
-                        final_composition[f"{parent} -> {sub}"] = round(effective_weight, 1)
-
-    with col2:
-        st.subheader("⚙️ Execution Engine")
-        st.write("**Target Composition Matrix:**")
-        st.json(final_composition)
-
-        active_chapter_idx = st.number_input(
-            "Select Chapter to Process", 
-            min_value=1, 
-            max_value=len(chapters), 
-            value=1
-        ) - 1
-
-        selected_chapter_text = chapters[active_chapter_idx]
-
-        if st.button("🚀 Process & Remix Chapter"):
-            client = get_gemini_client(api_key)
-            if not client:
-                st.error("Please provide a valid Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("Analyzing Chapter Scenario..."):
-                    # Step 1: Adaptive Scenario Mapping
-                    analysis_prompt = f"""
-                    Analyze the following chapter text. Identify the 3 to 5 primary narrative pillars 
-                    driving this specific text block (e.g., Action Tension, Character Subtext, Atmospheric Dread).
-                    Return your analysis strictly as a JSON object matching this schema:
-                    {{
-                        "narrative_pillars": ["pillar1", "pillar2", "pillar3"],
-                        "estimated_original_genre": "description"
-                    }}
-
-                    TEXT:
-                    {selected_chapter_text[:3000]}
-                    """
+            st.subheader("🧩 Sub-Genre Allocation")
+            final_composition = {}
+            
+            for parent, parent_weight in st.session_state.parent_weights.items():
+                if parent_weight > 0 and parent in age_config["sub_genres"]:
+                    sub_list = age_config["sub_genres"][parent]
                     
-                    try:
-                        analysis_response = client.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=analysis_prompt,
-                            config=types.GenerateContentConfig(response_mime_type="application/json")
-                        )
-                        scenario_data = json.loads(analysis_response.text)
-                        st.subheader("Adaptive Scenario Mapping Result")
-                        st.json(scenario_data)
+                    if parent not in st.session_state.sub_weights:
+                        st.session_state.sub_weights[parent] = {
+                            sub: round(100.0 / len(sub_list), 1) for sub in sub_list
+                        }
 
-                    except Exception as e:
-                        st.error(f"Analysis Error: {str(e)}")
-                        scenario_data = {"narrative_pillars": ["General Plot Progression"]}
+                    with st.expander(f"{parent} Sub-Genres (Allocated Share: {parent_weight:.1f}%)"):
+                        updated_subs = {}
+                        for sub in sub_list:
+                            s_val = st.slider(
+                                f"{sub} (%)",
+                                min_value=0.0,
+                                max_value=100.0,
+                                value=float(st.session_state.sub_weights[parent].get(sub, 0.0)),
+                                step=1.0,
+                                key=f"slider_sub_{parent}_{sub}"
+                            )
+                            updated_subs[sub] = s_val
 
-                # Step 2: Remixed Output Generation with Timeline Variance
-                with st.spinner("Generating Remixed Chapter & Updating Story Bible..."):
-                    history_summary = "\n".join([
-                        f"- Chapter {i+1}: {c[:150]}..." 
-                        for i, c in enumerate(st.session_state.remixed_chapters)
-                    ]) or "None (This is Chapter 1)."
+                        for sk, sv in updated_subs.items():
+                            if sv != st.session_state.sub_weights[parent].get(sk, 0.0):
+                                st.session_state.sub_weights[parent] = balance_percentages(updated_subs, sk)
+                                st.rerun()
 
-                    generation_prompt = f"""
-                    You are a developmental author executing a total thematic remix of a chapter.
+                        for sub, sub_pct in st.session_state.sub_weights[parent].items():
+                            effective_weight = (parent_weight * sub_pct) / 100.0
+                            final_composition[f"{parent} -> {sub}"] = round(effective_weight, 1)
 
-                    === TARGET AUDIENCE CONSTRAINT ===
-                    {age_config["system_instruction"]}
+        with col2:
+            st.subheader("⚙️ Execution Engine")
+            st.write("**Target Composition Matrix:**")
+            st.json(final_composition)
 
-                    === TARGET THEMATIC COMPOSITION ===
-                    {json.dumps(final_composition, indent=2)}
+            active_chapter_idx = st.number_input(
+                "Select Chapter Chunk to Process", 
+                min_value=1, 
+                max_value=len(chapters), 
+                value=1
+            ) - 1
 
-                    === NARRATIVE PILLARS TO ADAPT ===
-                    {json.dumps(scenario_data.get("narrative_pillars", []))}
+            selected_chapter_text = chapters[active_chapter_idx]
 
-                    === CURRENT GLOBAL STORY BIBLE ===
-                    {json.dumps(st.session_state.story_bible, indent=2)}
+            if st.button("🚀 Process & Remix Chapter"):
+                if not groq_api_key:
+                    st.error("Please enter a valid Groq API Key in the sidebar.")
+                else:
+                    client = Groq(api_key=groq_api_key)
+                    model_name = "llama-3.3-70b-versatile"
 
-                    === PREVIOUS REMIXED CHAPTERS SUMMARY ===
-                    {history_summary}
-
-                    === ORIGINAL CHAPTER TEXT ===
-                    {selected_chapter_text}
-
-                    === INSTRUCTIONS ===
-                    1. Re-imagine and rewrite the chapter to match the TARGET THEMATIC COMPOSITION and TARGET AUDIENCE CONSTRAINTS.
-                    2. TIMELINE VARIANCE PERMISSION: If the new thematic weights logically cause the characters to make a completely different decision than in the original text, EXECUTE THAT CHANGE. Let the plot branch organically (Butterfly Effect).
-                    3. Maintain narrative continuity with the previous remixed chapters.
-                    """
-
-                    try:
-                        gen_response = client.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=generation_prompt
-                        )
-                        remixed_text = gen_response.text
-                        st.session_state.remixed_chapters.append(remixed_text)
-
-                        # Step 3: Update Story Bible Background Call
-                        bible_prompt = f"""
-                        Read this newly generated chapter and update the global Story Bible.
-                        Return ONLY a valid JSON object matching this schema:
+                    with st.spinner("Analyzing Chapter Scenario..."):
+                        analysis_prompt = f"""
+                        Analyze the text. Extract 3 to 5 narrative pillars driving it.
+                        Return strictly JSON format:
                         {{
-                            "characters": ["updated list of characters and emotional states"],
-                            "world_rules": ["updated active world mechanics or tech levels"],
-                            "plot_threads": ["active open unresolved plot arcs"]
+                            "narrative_pillars": ["pillar1", "pillar2"],
+                            "estimated_genre": "description"
                         }}
+                        TEXT:
+                        {selected_chapter_text[:2500]}
+                        """
+                        
+                        try:
+                            analysis_response = client.chat.completions.create(
+                                model=model_name,
+                                messages=[{"role": "user", "content": analysis_prompt}],
+                                response_format={"type": "json_object"}
+                            )
+                            scenario_data = json.loads(analysis_response.choices[0].message.content)
+                            st.subheader("Adaptive Scenario Mapping Result")
+                            st.json(scenario_data)
 
-                        NEW CHAPTER TEXT:
-                        {remixed_text}
+                        except Exception as e:
+                            st.error(f"Analysis Error: {str(e)}")
+                            scenario_data = {"narrative_pillars": ["General Progression"]}
+
+                    with st.spinner("Generating Remixed Chapter & Updating Story Bible..."):
+                        history_summary = "\n".join([
+                            f"- Chapter {i+1}: {c[:150]}..." 
+                            for i, c in enumerate(st.session_state.remixed_chapters)
+                        ]) or "None (Chapter 1)."
+
+                        generation_prompt = f"""
+                        You are an author executing a full thematic remix of a novel chapter.
+
+                        === TARGET AUDIENCE ===
+                        {age_config["system_instruction"]}
+
+                        === THEMATIC COMPOSITION MATRIX ===
+                        {json.dumps(final_composition, indent=2)}
+
+                        === NARRATIVE PILLARS ===
+                        {json.dumps(scenario_data.get("narrative_pillars", []))}
+
+                        === STORY BIBLE STATE ===
+                        {json.dumps(st.session_state.story_bible, indent=2)}
+
+                        === PREVIOUS CHAPTERS SUMMARY ===
+                        {history_summary}
+
+                        === ORIGINAL TEXT ===
+                        {selected_chapter_text}
+
+                        === INSTRUCTIONS ===
+                        1. Rewrite the chapter matching the target composition and age limits.
+                        2. BUTTERFLY EFFECT PERMISSION: If slider weights force character decisions to shift, alter their actions and branch the story timeline.
                         """
 
-                        bible_response = client.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=bible_prompt,
-                            config=types.GenerateContentConfig(response_mime_type="application/json")
-                        )
-                        st.session_state.story_bible = json.loads(bible_response.text)
+                        try:
+                            gen_response = client.chat.completions.create(
+                                model=model_name,
+                                messages=[{"role": "user", "content": generation_prompt}]
+                            )
+                            remixed_text = gen_response.choices[0].message.content
+                            st.session_state.remixed_chapters.append(remixed_text)
 
-                        # Display Results
-                        st.subheader("📖 Generated Remixed Text")
-                        st.text_area("Output Text", remixed_text, height=400)
+                            # Update Story Bible
+                            bible_prompt = f"""
+                            Read this chapter and return an updated JSON Story Bible:
+                            {{
+                                "characters": ["list of characters and states"],
+                                "world_rules": ["world rules or tech levels"],
+                                "plot_threads": ["active plot arcs"]
+                            }}
+                            TEXT:
+                            {remixed_text[:3000]}
+                            """
 
-                        st.subheader("📚 Updated Story Bible State")
-                        st.json(st.session_state.story_bible)
+                            bible_response = client.chat.completions.create(
+                                model=model_name,
+                                messages=[{"role": "user", "content": bible_prompt}],
+                                response_format={"type": "json_object"}
+                            )
+                            st.session_state.story_bible = json.loads(bible_response.choices[0].message.content)
 
-                    except Exception as e:
-                        st.error(f"Generation Error: {str(e)}")
+                            st.subheader("📖 Generated Remixed Text")
+                            st.text_area("Output Text", remixed_text, height=400)
+
+                            st.subheader("📚 Updated Story Bible State")
+                            st.json(st.session_state.story_bible)
+
+                        except Exception as e:
+                            st.error(f"Generation Error: {str(e)}")
