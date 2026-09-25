@@ -9,30 +9,32 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 
 # ==========================================================
-# CONSTANTS & CONFIGURATION
+# CONFIGURATION & AGE FILTERS
 # ==========================================================
+st.set_page_config(page_title="Multiverse Novel Remix Engine", page_icon="📚", layout="wide")
+
 AGE_GROUPS = {
     "Early Reader (Ages 5-7)": {
-        "allowed_parents": ["Fantasy", "Sci-Fi", "Drama"],
+        "parents": ["Fantasy", "Sci-Fi", "Drama"],
         "sub_genres": {
             "Fantasy": ["Whimsical Fantasy", "Fable / Moral Tale"],
             "Sci-Fi": ["Outer Space Adventure", "Friendly Robots"],
             "Drama": ["Family & Friendship", "School Life"],
         },
-        "system_instruction": "Target Audience: Children ages 5-7. Use simple vocabulary, short sentences, whimsical/fun tone, and zero dark, violent, or romantic themes.",
+        "instruction": "Target Audience: Children ages 5-7. Use simple vocabulary, short sentences, whimsical/fun tone, and zero dark, violent, or romantic themes.",
     },
     "Middle Grade (Ages 8-12)": {
-        "allowed_parents": ["Fantasy", "Sci-Fi", "Drama", "Mystery"],
+        "parents": ["Fantasy", "Sci-Fi", "Drama", "Mystery"],
         "sub_genres": {
             "Fantasy": ["High Fantasy", "Urban Fantasy"],
             "Sci-Fi": ["Soft Sci-Fi", "Space Opera"],
             "Drama": ["Coming of Age", "Friendship"],
             "Mystery": ["Sleuth / Puzzle", "Adventure Mystery"],
         },
-        "system_instruction": "Target Audience: Middle Grade (Ages 8-12). Pacing should be adventurous, age-appropriate action, light humor, and accessible sentence structure.",
+        "instruction": "Target Audience: Middle Grade (Ages 8-12). Pacing should be adventurous, age-appropriate action, light humor, and accessible sentence structure.",
     },
     "Young Adult (Ages 13-17)": {
-        "allowed_parents": ["Fantasy", "Sci-Fi", "Drama", "Mystery", "Romance", "Horror"],
+        "parents": ["Fantasy", "Sci-Fi", "Drama", "Mystery", "Romance", "Horror"],
         "sub_genres": {
             "Fantasy": ["High Fantasy", "Urban Fantasy", "Dark Fantasy"],
             "Sci-Fi": ["Cyberpunk", "Dystopian", "Hard Sci-Fi"],
@@ -41,10 +43,10 @@ AGE_GROUPS = {
             "Romance": ["First Love", "Slow Burn"],
             "Horror": ["Supernatural", "Cosmic Horror"],
         },
-        "system_instruction": "Target Audience: Young Adult (Ages 13-17). Character-driven focus, emotional depth, moderate intensity, and modern dialogue pacing.",
+        "instruction": "Target Audience: Young Adult (Ages 13-17). Character-driven focus, emotional depth, moderate intensity, and modern dialogue pacing.",
     },
     "Adult (Ages 18+)": {
-        "allowed_parents": ["Fantasy", "Sci-Fi", "Drama", "Mystery", "Romance", "Horror"],
+        "parents": ["Fantasy", "Sci-Fi", "Drama", "Mystery", "Romance", "Horror"],
         "sub_genres": {
             "Fantasy": ["High Fantasy", "Grimdark", "Urban Fantasy"],
             "Sci-Fi": ["Hard Sci-Fi", "Cyberpunk", "Post-Apocalyptic"],
@@ -53,12 +55,12 @@ AGE_GROUPS = {
             "Romance": ["Contemporary Romance", "Romantic Suspense"],
             "Horror": ["Psychological Horror", "Body Horror", "Cosmic Horror"],
         },
-        "system_instruction": "Target Audience: Adults. Complex prose, unconstrained thematic elements, mature emotional subtext, and rich world-building.",
+        "instruction": "Target Audience: Adults. Complex prose, unconstrained thematic elements, mature emotional subtext, and rich world-building.",
     },
 }
 
 # ==========================================================
-# FILE PARSING FUNCTIONS
+# FILE PARSING & CHAPTER CHUNKING
 # ==========================================================
 def extract_text_from_file(uploaded_file):
     filename = uploaded_file.name.lower()
@@ -91,251 +93,230 @@ def split_into_chapters(text: str):
     chapters = [c.strip() for c in re.split(pattern, text, flags=re.MULTILINE) if c.strip()]
     if not chapters:
         words = text.split()
-        chunk_size = 3000
+        chunk_size = 2500
         chapters = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
     return chapters or [text]
 
-def balance_percentages(values_dict, changed_key, target_total=100.0):
-    num_items = len(values_dict)
-    if num_items <= 1:
-        return {k: target_total for k in values_dict}
+# ==========================================================
+# SLIDER STATE MANAGEMENT & MATH BALANCE
+# ==========================================================
+def update_parent_weights(changed_key, allowed_parents):
+    new_val = st.session_state[f"slider_parent_{changed_key}"]
+    remaining = 100.0 - new_val
+    other_keys = [p for p in allowed_parents if p != changed_key]
+    old_sum_others = sum(st.session_state.get(f"slider_parent_{k}", 0.0) for k in other_keys)
 
-    new_val = values_dict[changed_key]
-    remaining_target = target_total - new_val
-    old_sum_others = sum(v for k, v in values_dict.items() if k != changed_key)
-
-    result = {}
-    for k, v in values_dict.items():
-        if k == changed_key:
-            result[k] = new_val
-        elif old_sum_others == 0:
-            result[k] = remaining_target / (num_items - 1)
+    for k in other_keys:
+        if old_sum_others == 0:
+            st.session_state[f"slider_parent_{k}"] = round(remaining / len(other_keys), 1)
         else:
-            result[k] = round((v / old_sum_others) * remaining_target, 1)
-
-    return result
+            old_val = st.session_state.get(f"slider_parent_{k}", 0.0)
+            st.session_state[f"slider_parent_{k}"] = round((old_val / old_sum_others) * remaining, 1)
 
 # ==========================================================
-# STREAMLIT UI SETUP & SESSION STATE
+# SESSION STATE INITIALIZATION
 # ==========================================================
-st.set_page_config(page_title="Multiverse Novel Remix Engine", layout="wide")
-st.title("🌌 The Multiverse Novel Remix Engine")
-
+if "remixed_text" not in st.session_state:
+    st.session_state.remixed_text = ""
 if "story_bible" not in st.session_state:
     st.session_state.story_bible = {"characters": [], "world_rules": [], "plot_threads": []}
-if "remixed_chapters" not in st.session_state:
-    st.session_state.remixed_chapters = []
-if "parent_weights" not in st.session_state:
-    st.session_state.parent_weights = {}
-if "sub_weights" not in st.session_state:
-    st.session_state.sub_weights = {}
+if "processing_complete" not in st.session_state:
+    st.session_state.processing_complete = False
 
-# Sidebar Setup
-st.sidebar.header("🔑 Configuration")
-openrouter_api_key = st.sidebar.text_input("Enter OpenRouter API Key", type="password")
-st.sidebar.caption("Get a free key instantly at [openrouter.ai](https://openrouter.ai)")
+# Sidebar Config
+st.sidebar.title("🛠️ Control Panel")
+openrouter_api_key = st.sidebar.text_input("OpenRouter API Key", type="password")
+st.sidebar.caption("Get a free key at [openrouter.ai](https://openrouter.ai)")
 
 selected_age_group = st.sidebar.selectbox("Target Audience Age Group", list(AGE_GROUPS.keys()))
 age_config = AGE_GROUPS[selected_age_group]
-allowed_parents = age_config["allowed_parents"]
+allowed_parents = age_config["parents"]
 
-# Re-initialize sliders if age group constraints change
-for p in allowed_parents:
-    if p not in st.session_state.parent_weights:
-        st.session_state.parent_weights[p] = round(100.0 / len(allowed_parents), 1)
-
-st.session_state.parent_weights = {
-    k: v for k, v in st.session_state.parent_weights.items() if k in allowed_parents
-}
-
-total_p = sum(st.session_state.parent_weights.values()) or 1.0
-st.session_state.parent_weights = {
-    k: round((v / total_p) * 100.0, 1) for k, v in st.session_state.parent_weights.items()
-}
+# Initialize Parent Sliders
+for idx, p in enumerate(allowed_parents):
+    if f"slider_parent_{p}" not in st.session_state:
+        st.session_state[f"slider_parent_{p}"] = round(100.0 / len(allowed_parents), 1)
 
 # ==========================================================
-# MAIN INTERFACE
+# HEADER & SLIDER UI
 # ==========================================================
+st.title("📚 Multiverse Novel Remix Engine")
+st.markdown("Upload a novel, balance the theme sliders, and automatically transform the entire manuscript into a new parallel narrative.")
+
 uploaded_file = st.file_uploader("Upload Manuscript (.txt, .pdf, .epub)", type=["txt", "pdf", "epub"])
 
 if uploaded_file:
     raw_text = extract_text_from_file(uploaded_file)
     if not raw_text.strip():
-        st.error("Could not extract text from this file. Please ensure it contains readable text.")
+        st.error("Error reading file content. Please check the uploaded file.")
     else:
         chapters = split_into_chapters(raw_text)
-        st.success(f"File parsed! Extracted ~{len(raw_text.split())} words divided into {len(chapters)} chapter chunk(s).")
+        
+        st.subheader("🎛️ Genre & Sub-Genre Balance")
+        col_sliders, col_summary = st.columns([2, 1])
 
-        col1, col2 = st.columns([1, 1])
-
-        with col1:
-            st.subheader("🎛️ Theme & Genre Sliders")
-            updated_parents = {}
+        with col_sliders:
+            # Parent Genre Sliders
             for parent in allowed_parents:
-                val = st.slider(
-                    f"{parent} Weight (%)",
+                st.slider(
+                    f"**{parent}** (%)",
                     min_value=0.0,
                     max_value=100.0,
-                    value=float(st.session_state.parent_weights.get(parent, 0.0)),
-                    step=1.0,
-                    key=f"slider_parent_{parent}"
+                    key=f"slider_parent_{parent}",
+                    on_change=update_parent_weights,
+                    args=(parent, allowed_parents)
                 )
-                updated_parents[parent] = val
 
-            for k, v in updated_parents.items():
-                if v != st.session_state.parent_weights.get(k, 0.0):
-                    st.session_state.parent_weights = balance_percentages(updated_parents, k)
-                    st.rerun()
-
-            st.subheader("🧩 Sub-Genre Allocation")
+            # Sub-Genre Expanders
             final_composition = {}
-            
-            for parent, parent_weight in st.session_state.parent_weights.items():
-                if parent_weight > 0 and parent in age_config["sub_genres"]:
+            for parent in allowed_parents:
+                p_weight = st.session_state.get(f"slider_parent_{parent}", 0.0)
+                if p_weight > 0 and parent in age_config["sub_genres"]:
                     sub_list = age_config["sub_genres"][parent]
-                    
-                    if parent not in st.session_state.sub_weights:
-                        st.session_state.sub_weights[parent] = {
-                            sub: round(100.0 / len(sub_list), 1) for sub in sub_list
-                        }
-
-                    with st.expander(f"{parent} Sub-Genres (Allocated Share: {parent_weight:.1f}%)"):
-                        updated_subs = {}
+                    with st.expander(f"Fine-tune {parent} Sub-Genres"):
+                        sub_weight = round(p_weight / len(sub_list), 1)
                         for sub in sub_list:
-                            s_val = st.slider(
-                                f"{sub} (%)",
-                                min_value=0.0,
-                                max_value=100.0,
-                                value=float(st.session_state.sub_weights[parent].get(sub, 0.0)),
-                                step=1.0,
-                                key=f"slider_sub_{parent}_{sub}"
-                            )
-                            updated_subs[sub] = s_val
+                            final_composition[f"{parent} -> {sub}"] = sub_weight
+                            st.caption(f"• **{sub}**: ~{sub_weight}% allocated")
+                elif p_weight > 0:
+                    final_composition[parent] = p_weight
 
-                        for sk, sv in updated_subs.items():
-                            if sv != st.session_state.sub_weights[parent].get(sk, 0.0):
-                                st.session_state.sub_weights[parent] = balance_percentages(updated_subs, sk)
-                                st.rerun()
+        with col_summary:
+            st.info(f"**Manuscript Parsed**\n- **Total Words:** ~{len(raw_text.split()):,}\n- **Chapter Chunks:** {len(chapters)}")
+            st.markdown("**Effective Target Matrix:**")
+            for genre_name, weight in final_composition.items():
+                st.progress(min(int(weight), 100), text=f"{genre_name}: {weight:.1f}%")
 
-                        for sub, sub_pct in st.session_state.sub_weights[parent].items():
-                            effective_weight = (parent_weight * sub_pct) / 100.0
-                            final_composition[f"{parent} -> {sub}"] = round(effective_weight, 1)
+            start_button = st.button("🚀 Remix Entire Novel", type="primary", use_container_width=True)
 
-        with col2:
-            st.subheader("⚙️ Execution Engine")
-            st.write("**Target Composition Matrix:**")
-            st.json(final_composition)
+        # ==========================================================
+        # AUTOMATED PROCESSING ENGINE
+        # ==========================================================
+        if start_button:
+            if not openrouter_api_key:
+                st.error("Please enter a valid OpenRouter API Key in the sidebar.")
+            else:
+                client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=openrouter_api_key
+                )
+                model_name = "meta-llama/llama-3.3-70b-instruct:free"
 
-            active_chapter_idx = st.number_input(
-                "Select Chapter Chunk to Process", 
-                min_value=1, 
-                max_value=len(chapters), 
-                value=1
-            ) - 1
+                st.divider()
+                st.subheader("⚙️ Automated Remix Pipeline Running...")
+                
+                progress_bar = st.progress(0, text="Initializing Story Engine...")
+                status_box = st.empty()
 
-            selected_chapter_text = chapters[active_chapter_idx]
+                remixed_chapters_list = []
+                story_bible = {"characters": [], "world_rules": [], "plot_threads": []}
 
-            if st.button("🚀 Process & Remix Chapter"):
-                if not openrouter_api_key:
-                    st.error("Please enter a valid OpenRouter API Key in the sidebar.")
-                else:
-                    client = OpenAI(
-                        base_url="https://openrouter.ai/api/v1",
-                        api_key=openrouter_api_key
-                    )
-                    # Using a top-performing free model hosted on OpenRouter
-                    model_name = "meta-llama/llama-3.3-70b-instruct:free"
+                for idx, ch_text in enumerate(chapters):
+                    ch_num = idx + 1
+                    status_box.info(f"🔄 Processing Chapter {ch_num} of {len(chapters)}...")
+                    progress_bar.progress(int((idx / len(chapters)) * 100), text=f"Transforming Chapter {ch_num}...")
 
-                    with st.spinner("Analyzing Chapter Scenario..."):
-                        analysis_prompt = f"""
-                        Analyze the text. Extract 3 to 5 narrative pillars driving it.
-                        Return strictly JSON format:
+                    history_summary = "\n".join([
+                        f"- Chapter {i+1}: {c[:200]}..." 
+                        for i, c in enumerate(remixed_chapters_list)
+                    ]) or "None (Beginning of book)."
+
+                    # Main Rewrite Prompt
+                    rewrite_prompt = f"""
+                    You are a master developmental novelist executing a thematic remix of a chapter.
+
+                    === TARGET AUDIENCE ===
+                    {age_config["instruction"]}
+
+                    === TARGET THEMATIC COMPOSITION MATRIX ===
+                    {json.dumps(final_composition, indent=2)}
+
+                    === CURRENT GLOBAL STORY BIBLE STATE ===
+                    {json.dumps(story_bible, indent=2)}
+
+                    === SUMMARY OF RECENTLY REMIXED CHAPTERS ===
+                    {history_summary}
+
+                    === ORIGINAL CHAPTER TEXT ===
+                    {ch_text}
+
+                    === INSTRUCTIONS ===
+                    1. Completely rewrite this chapter to embody the target thematic composition and target audience guidelines.
+                    2. BUTTERFLY EFFECT PERMISSION: If the new target themes dictate that characters would make a different decision, EXECUTE THAT CHANGE. Let the plot branch and flow into a new timeline naturally.
+                    3. Write directly in rich narrative prose. Do not include introductory commentary or system notes.
+                    """
+
+                    try:
+                        res = client.chat.completions.create(
+                            model=model_name,
+                            messages=[{"role": "user", "content": rewrite_prompt}]
+                        )
+                        remixed_ch = res.choices[0].message.content
+                        remixed_chapters_list.append(remixed_ch)
+
+                        # Story Bible Update Prompt
+                        bible_prompt = f"""
+                        Read this newly generated chapter and return an updated JSON Story Bible.
+                        Return ONLY valid JSON with no backticks:
                         {{
-                            "narrative_pillars": ["pillar1", "pillar2"],
-                            "estimated_genre": "description"
+                            "characters": ["updated list of characters and current emotional states"],
+                            "world_rules": ["updated active world mechanics or tech levels"],
+                            "plot_threads": ["active unresolved plot arcs"]
                         }}
+
                         TEXT:
-                        {selected_chapter_text[:2500]}
+                        {remixed_ch[:3000]}
                         """
+
+                        bible_res = client.chat.completions.create(
+                            model=model_name,
+                            messages=[{"role": "user", "content": bible_prompt}],
+                            response_format={"type": "json_object"}
+                        )
+                        story_bible = json.loads(bible_res.choices[0].message.content)
+
+                    except Exception as e:
+                        st.error(f"Error encountered on Chapter {ch_num}: {str(e)}")
+                        break
+
+                progress_bar.progress(100, text="Transformation Complete!")
+                status_box.success("🎉 Entire novel remixed successfully!")
+
+                st.session_state.remixed_text = "\n\n=== NEXT CHAPTER ===\n\n".join(remixed_chapters_list)
+                st.session_state.story_bible = story_bible
+                st.session_state.processing_complete = True
+
+        # ==========================================================
+        # CLEAN OUTPUT TABS
+        # ==========================================================
+        if st.session_state.processing_complete:
+            st.divider()
+            tab_novel, tab_bible = st.tabs(["📖 Remixed Manuscript", "📚 Dynamic Story Bible"])
+
+            with tab_novel:
+                st.download_button(
+                    "💾 Download Full Remixed Novel (.txt)",
+                    data=st.session_state.remixed_text,
+                    file_name="remixed_novel.txt",
+                    mime="text/plain"
+                )
+                st.text_area("Full Manuscript Output", st.session_state.remixed_text, height=600)
+
+            with tab_bible:
+                st.subheader("Global Narrative Continuity State")
+                col_c, col_w, col_p = st.columns(3)
+                
+                with col_c:
+                    st.markdown("### 👤 Characters")
+                    for item in st.session_state.story_bible.get("characters", []):
+                        st.write(f"- {item}")
                         
-                        try:
-                            analysis_response = client.chat.completions.create(
-                                model=model_name,
-                                messages=[{"role": "user", "content": analysis_prompt}],
-                                response_format={"type": "json_object"}
-                            )
-                            scenario_data = json.loads(analysis_response.choices[0].message.content)
-                            st.subheader("Adaptive Scenario Mapping Result")
-                            st.json(scenario_data)
-
-                        except Exception as e:
-                            st.error(f"Analysis Error: {str(e)}")
-                            scenario_data = {"narrative_pillars": ["General Progression"]}
-
-                    with st.spinner("Generating Remixed Chapter & Updating Story Bible..."):
-                        history_summary = "\n".join([
-                            f"- Chapter {i+1}: {c[:150]}..." 
-                            for i, c in enumerate(st.session_state.remixed_chapters)
-                        ]) or "None (Chapter 1)."
-
-                        generation_prompt = f"""
-                        You are an author executing a full thematic remix of a novel chapter.
-
-                        === TARGET AUDIENCE ===
-                        {age_config["system_instruction"]}
-
-                        === THEMATIC COMPOSITION MATRIX ===
-                        {json.dumps(final_composition, indent=2)}
-
-                        === NARRATIVE PILLARS ===
-                        {json.dumps(scenario_data.get("narrative_pillars", []))}
-
-                        === STORY BIBLE STATE ===
-                        {json.dumps(st.session_state.story_bible, indent=2)}
-
-                        === PREVIOUS CHAPTERS SUMMARY ===
-                        {history_summary}
-
-                        === ORIGINAL TEXT ===
-                        {selected_chapter_text}
-
-                        === INSTRUCTIONS ===
-                        1. Rewrite the chapter matching the target composition and age limits.
-                        2. BUTTERFLY EFFECT PERMISSION: If slider weights force character decisions to shift, alter their actions and branch the story timeline.
-                        """
-
-                        try:
-                            gen_response = client.chat.completions.create(
-                                model=model_name,
-                                messages=[{"role": "user", "content": generation_prompt}]
-                            )
-                            remixed_text = gen_response.choices[0].message.content
-                            st.session_state.remixed_chapters.append(remixed_text)
-
-                            # Update Story Bible
-                            bible_prompt = f"""
-                            Read this chapter and return an updated JSON Story Bible:
-                            {{
-                                "characters": ["list of characters and states"],
-                                "world_rules": ["world rules or tech levels"],
-                                "plot_threads": ["active plot arcs"]
-                            }}
-                            TEXT:
-                            {remixed_text[:3000]}
-                            """
-
-                            bible_response = client.chat.completions.create(
-                                model=model_name,
-                                messages=[{"role": "user", "content": bible_prompt}],
-                                response_format={"type": "json_object"}
-                            )
-                            st.session_state.story_bible = json.loads(bible_response.choices[0].message.content)
-
-                            st.subheader("📖 Generated Remixed Text")
-                            st.text_area("Output Text", remixed_text, height=400)
-
-                            st.subheader("📚 Updated Story Bible State")
-                            st.json(st.session_state.story_bible)
-
-                        except Exception as e:
-                            st.error(f"Generation Error: {str(e)}")
+                with col_w:
+                    st.markdown("### 🌐 World Rules")
+                    for item in st.session_state.story_bible.get("world_rules", []):
+                        st.write(f"- {item}")
+                        
+                with col_p:
+                    st.markdown("### 🎯 Plot Threads")
+                    for item in st.session_state.story_bible.get("plot_threads", []):
+                        st.write(f"- {item}")
