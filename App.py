@@ -2,7 +2,7 @@ import json
 import re
 import io
 import streamlit as st
-from groq import Groq
+from openai import OpenAI
 import pypdf
 import ebooklib
 from ebooklib import epub
@@ -76,7 +76,6 @@ def extract_text_from_file(uploaded_file):
         return text
     
     elif filename.endswith(".epub"):
-        # Load EPUB from memory stream
         bytes_data = uploaded_file.read()
         book = epub.read_epub(io.BytesIO(bytes_data))
         text = ""
@@ -91,7 +90,6 @@ def split_into_chapters(text: str):
     pattern = r"(?i)(?=^#+\s|^Chapter\s+\d+|^CHAPTER\s+\d+)"
     chapters = [c.strip() for c in re.split(pattern, text, flags=re.MULTILINE) if c.strip()]
     if not chapters:
-        # Fallback: split long non-chapter text into ~3000 word blocks
         words = text.split()
         chunk_size = 3000
         chapters = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
@@ -134,8 +132,8 @@ if "sub_weights" not in st.session_state:
 
 # Sidebar Setup
 st.sidebar.header("🔑 Configuration")
-groq_api_key = st.sidebar.text_input("Enter Free Groq API Key", type="password")
-st.sidebar.caption("Get a free key instantly at [console.groq.com](https://console.groq.com)")
+openrouter_api_key = st.sidebar.text_input("Enter OpenRouter API Key", type="password")
+st.sidebar.caption("Get a free key instantly at [openrouter.ai](https://openrouter.ai)")
 
 selected_age_group = st.sidebar.selectbox("Target Audience Age Group", list(AGE_GROUPS.keys()))
 age_config = AGE_GROUPS[selected_age_group]
@@ -238,11 +236,15 @@ if uploaded_file:
             selected_chapter_text = chapters[active_chapter_idx]
 
             if st.button("🚀 Process & Remix Chapter"):
-                if not groq_api_key:
-                    st.error("Please enter a valid Groq API Key in the sidebar.")
+                if not openrouter_api_key:
+                    st.error("Please enter a valid OpenRouter API Key in the sidebar.")
                 else:
-                    client = Groq(api_key=groq_api_key)
-                    model_name = "llama-3.3-70b-versatile"
+                    client = OpenAI(
+                        base_url="https://openrouter.ai/api/v1",
+                        api_key=openrouter_api_key
+                    )
+                    # Using a top-performing free model hosted on OpenRouter
+                    model_name = "meta-llama/llama-3.3-70b-instruct:free"
 
                     with st.spinner("Analyzing Chapter Scenario..."):
                         analysis_prompt = f"""
